@@ -10,7 +10,7 @@ from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from htmlTemplates import css, bot_template, user_template
-from langchain.llms import HuggingFaceHub
+from langchain.retrievers import BM25Retriever, EnsembleRetriever
 import re
 
 
@@ -84,38 +84,45 @@ def get_text_chunks(text):
 
 def get_vectorstore(text_chunks):
     embeddings = OpenAIEmbeddings()
-    # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
     vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
     return vectorstore
 
 
-def get_contextual_compression_retriever(vectorstore, llm):
-    # Create a compressor - you can use LLMChainExtractor or any other compressor you prefer
-    compressor = LLMChainExtractor.from_llm(llm)
+def get_ensemble_retriever(text_chunks, vectorstore, llm):
+    # Initialize BM25Retriever
+    bm25_retriever = BM25Retriever.from_texts(text_chunks)
+    bm25_retriever.k = 2  # You can adjust 'k' based on your preference
+
+    # Use the FAISS vector store as a retriever
+    faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
 
     # Create the Contextual Compression Retriever
+    compressor = LLMChainExtractor.from_llm(llm)
     compression_retriever = ContextualCompressionRetriever(
         base_compressor=compressor,
-        base_retriever=vectorstore.as_retriever()
+        base_retriever=faiss_retriever
     )
-    return compression_retriever
+
+    # Initialize the Ensemble Retriever
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[bm25_retriever, compression_retriever], weights=[0.5, 0.5]
+    )
+
+    return ensemble_retriever
 
 
-def get_conversation_chain(vectorstore):
+def get_conversation_chain(text_chunks, vectorstore):
     llm = ChatOpenAI()
+    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
 
-    memory = ConversationBufferMemory(
-        memory_key='chat_history', return_messages=True)
-
-    compression_retriever = get_contextual_compression_retriever(vectorstore, llm)
+    ensemble_retriever = get_ensemble_retriever(text_chunks, vectorstore, llm)
 
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
-        retriever=compression_retriever,
+        retriever=ensemble_retriever,
         memory=memory
     )
     return conversation_chain
-
 
 def handle_userinput(user_question):
     response = st.session_state.conversation({'question': user_question})
@@ -165,8 +172,7 @@ def main():
                 vectorstore = get_vectorstore(text_chunks)
 
                 # create conversation chain
-                st.session_state.conversation = get_conversation_chain(
-                    vectorstore)
+                st.session_state.conversation = get_conversation_chain(text_chunks, vectorstore)
 
 
 if __name__ == '__main__':
